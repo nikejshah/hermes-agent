@@ -32,7 +32,10 @@ The workflow is self-contained: it uses GitHub CLI and Node.js to fetch and
 validate exact-base/exact-head metadata plus the complete unified diff media
 response from the trusted GitHub API. It fails closed when the response may be
 truncated, contains binary changes, or exceeds the 800000-byte prompt-file
-safety bound. The trusted base `AGENTS.md` policy packet includes root and
+safety bound. Hermes uses a separate 131072-byte bound for the trusted base
+`AGENTS.md` policy packet because its measured root policy is 76090 bytes before
+packet framing; the bound leaves room for applicable ancestor policies while
+still failing closed on unexpected growth. The policy packet includes root and
 changed-file ancestor `AGENTS.md` files that exist at the trusted base, with
 path depth, candidate count and total bytes bounded. If no applicable
 `AGENTS.md` exists at the trusted base, the packet contains an explicit
