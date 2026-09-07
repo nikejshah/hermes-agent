@@ -123,17 +123,21 @@ jobs:
             return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
           };
           const receiptMarker = `<!-- claude-review-failed-run:${failedRunId} -->`;
-          const receiptCommentAlreadyPublished = async (prNumber) => {
+          const receiptCommentAlreadyPublished = async (prNumber, base = "", head = "") => {
             let url = `${apiUrl}/repos/${repository}/issues/${prNumber}/comments?per_page=100`;
             for (let pages = 0; url; pages += 1) {
               if (pages >= 10) throw new Error("Issue comment pagination exceeds the failed-run receipt bound");
               const { data, link } = await requestJson(url);
               if (!Array.isArray(data)) throw new Error("Issue comment response is malformed");
-              if (data.some((comment) =>
-                comment?.user?.login === "github-actions[bot]" &&
-                typeof comment.body === "string" &&
-                comment.body.includes(receiptMarker) &&
-                comment.body.includes(detailsUrl))) return true;
+              if (data.some((comment) => {
+                if (comment?.user?.login !== "github-actions[bot]" || typeof comment.body !== "string") return false;
+                if (comment.body.includes(receiptMarker) && comment.body.includes(`[Details](${detailsUrl})`)) return true;
+                return Boolean(base && head &&
+                  /Claude review (?:receipt|correction):/.test(comment.body) &&
+                  comment.body.includes(`base \`${base}\``) &&
+                  comment.body.includes(`head \`${head}\``) &&
+                  comment.body.includes(`[Details](${detailsUrl})`));
+              })) return true;
               url = nextPage(link);
             }
             return false;
@@ -178,7 +182,7 @@ jobs:
               return;
             }
 
-            const commentAlreadyPublished = await receiptCommentAlreadyPublished(resolved.prNumber);
+            const commentAlreadyPublished = await receiptCommentAlreadyPublished(resolved.prNumber, resolved.base, resolved.head);
             const statusAlreadyPublished = await failureStatusAlreadyPublished(resolved.head);
 
             const live = await currentPrRefs(resolved.prNumber);

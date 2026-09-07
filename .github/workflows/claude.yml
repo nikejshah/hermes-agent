@@ -409,16 +409,79 @@ jobs:
       - name: Mark exact-head review pending
         shell: bash
         env:
+          API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
           DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending \
-            -f context='factory-os/claude-review' \
-            -f description='Claude exact-head review is running' \
-            -f target_url="$DETAILS_URL"
+          node <<'NODE'
+          const apiUrl = process.env.API_URL || "https://api.github.com";
+          const repository = process.env.REPOSITORY || "";
+          const token = process.env.GH_TOKEN || "";
+          const currentRunId = process.env.RUN_ID || "";
+          const actor = process.env.ACTOR || "";
+          const triggeringActor = process.env.TRIGGERING_ACTOR || "";
+          const base = process.env.BASE_SHA || "";
+          const head = process.env.HEAD_SHA || "";
+          const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" };
+          const requestJson = async (url) => {
+            const response = await fetch(url, { headers });
+            if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
+            return { data: await response.json(), link: response.headers.get("link") || "" };
+          };
+          const nextPage = (link) => {
+            const next = link.split(",").map((part) => part.trim()).find((part) => /;\s*rel="next"$/.test(part));
+            return next ? /^<([^>]+)>/.exec(next)?.[1] || "" : "";
+          };
+          const exactJob = `claude-review-pr-${process.env.PR_NUMBER || ""}-base-${base}-head-${head}`;
+          const hasExactJob = async (runId) => {
+            let url = `${apiUrl}/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Workflow job pagination exceeds the pending guard bound");
+              const { data, link } = await requestJson(url);
+              if ((data.jobs || []).some((job) => job.name === exactJob)) return true;
+              url = nextPage(link);
+            }
+            return false;
+          };
+          (async () => {
+            if (actor !== "nikejshah" || triggeringActor !== "nikejshah") throw new Error("Pending review requires the owner as actor and triggering actor");
+            if (!/^\d+$/.test(currentRunId)) throw new Error("Current workflow run id is malformed");
+            let url = `${apiUrl}/repos/${repository}/actions/workflows/claude.yml/runs?per_page=100`;
+            let newer = false;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Workflow run pagination exceeds the pending guard bound");
+              const { data, link } = await requestJson(url);
+              for (const run of data.workflow_runs || []) {
+                if (!/^\d+$/.test(String(run.id))) continue;
+                const runId = BigInt(run.id);
+                if (runId <= BigInt(currentRunId)) continue;
+                if (run.actor?.login === "nikejshah" && run.triggering_actor?.login === "nikejshah" && await hasExactJob(run.id)) {
+                  newer = true;
+                  break;
+                }
+              }
+              if (newer) break;
+              url = nextPage(link);
+            }
+            if (newer) {
+              console.log("Skipping pending status because a newer owner-triggered exact-head review exists");
+              return;
+            }
+            const response = await fetch(`${apiUrl}/repos/${repository}/statuses/${head}`, {
+              method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+              body: JSON.stringify({ state: "pending", context: "factory-os/claude-review", description: "Claude exact-head review is running", target_url: process.env.DETAILS_URL || "" }),
+            });
+            if (!response.ok) throw new Error(`pending status returned HTTP ${response.status}`);
+          })().catch((error) => { console.error(`Failed to mark exact-head review pending: ${error.message}`); process.exitCode = 1; });
+          NODE
 
       - name: Verify exact-head API metadata
         if: inputs.expected_head_sha != ''

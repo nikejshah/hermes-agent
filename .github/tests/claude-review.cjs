@@ -12,8 +12,9 @@ const policyLoader = mainBlocks.find(block => block.includes('Applicable AGENTS.
 const metadataGuard = mainBlocks.find(block => block.includes('same-repository head are required'));
 const packet = mainBlocks.find(block => block.includes('fs.writeFileSync(process.env.PROMPT_FILE'));
 const receipt = mainBlocks.find(block => block.includes('factory-os:review-receipt-parser:start'));
+const pendingGuard = mainBlocks.find(block => block.includes('Skipping pending status because a newer owner-triggered exact-head review exists'));
 const companionReceipt = blocks(companion)[0];
-assert(invalidation && ambiguousInvalidation && policyLoader && metadataGuard && packet && receipt && companionReceipt);
+assert(invalidation && ambiguousInvalidation && policyLoader && metadataGuard && packet && receipt && pendingGuard && companionReceipt);
 assert(packet.includes('const compare')); assert(receipt.includes('RECEIPT_TEST_MODE'));
 assert(main.indexOf('Mark exact-head review pending') > main.indexOf('  claude-review:'), 'pending belongs to the discoverable exact-head job');
 assert(main.includes("github.triggering_actor == 'nikejshah' && ("), 'reruns require the owner as triggering actor');
@@ -164,6 +165,19 @@ function receiptTest(payload, outcome='success', env={}) {
   vm.runInNewContext(receipt,{require:()=>fs,process:processMock,console});
   return {result:JSON.parse(output),code:processMock.exitCode};
 }
+async function pendingGuardTest(newer=false) {
+  const posts=[];
+  const processMock={env:{API_URL:'https://mock.test',REPOSITORY:'owner/repo',RUN_ID:'1',ACTOR:'nikejshah',TRIGGERING_ACTOR:'nikejshah',PR_NUMBER:'4',BASE_SHA:base,HEAD_SHA:head,DETAILS_URL:'https://mock.test/run/1',GH_TOKEN:'token'},exitCode:undefined};
+  const context={process:processMock,console:{error:()=>{},log:()=>{}},fetch:async(url,options={})=>{
+    if(options.method==='POST'){posts.push({url,body:JSON.parse(options.body)});return {ok:true};}
+    if(url.includes('/workflows/claude.yml/runs')) return {ok:true,json:async()=>({workflow_runs:newer?[{id:2,actor:{login:'nikejshah'},triggering_actor:{login:'nikejshah'}}]:[]}),headers:{get:()=>''}};
+    if(url.includes('/actions/runs/2/jobs')) return {ok:true,json:async()=>({jobs:[{name:`claude-review-pr-4-base-${base}-head-${head}`}]}),headers:{get:()=>''}};
+    throw new Error(`unexpected ${url}`);
+  }};
+  const result=vm.runInNewContext(pendingGuard,context);
+  if(result&&typeof result.then==='function') await result;
+  return posts;
+}
 async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActor=null,newerJob=true,primary=false,triggeringActor='nikejshah',extra={}) {
   const posts=[];
   const paged = (items, page, linkBase, forceNext=false) => {
@@ -205,6 +219,14 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
     return {ok:true,json:async()=>data,headers:{get:()=>url.includes('/workflows/') && extra.workflowLink ? extra.workflowLink : ''}};
   }});
   return posts;
+}
+async function primaryThenCompanionTest() {
+  const primaryPosts = await companionTest(`claude-review-pr-4-base-${base}-head-${head}`,'Claude review PR #4 @ resolve-head',head,base,null,true,true);
+  const primaryComment = primaryPosts.find((post) => post.url.includes('/issues/4/comments'));
+  assert(primaryComment, 'primary publisher must produce the actual receipt comment');
+  return companionTest(`claude-review-pr-4-base-${base}-head-${head}`,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{
+    comments:[{user:{login:'github-actions[bot]',type:'Bot'},body:primaryComment.body.body}],
+  });
 }
 (async()=>{
   assert.equal((await invalidationTest()).posts.filter(p=>p.url.includes(`/statuses/${head}`)).length,1);
@@ -263,6 +285,8 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:base,summary:'ok',report:''}).result.state,'failure');
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''},'failure').result.state,'failure');
   const exactJob = `claude-review-pr-4-base-${base}-head-${head}`;
+  assert.equal((await pendingGuardTest(false)).length,1, 'pending status is written when no newer exact-head owner run exists');
+  assert.equal((await pendingGuardTest(true)).length,0, 'older reruns cannot overwrite a newer exact-head owner status with pending');
   const receiptComment = {user:{login:'github-actions[bot]',type:'Bot'},body:'<!-- claude-review-failed-run:1 -->\nClaude review receipt: **FAIL** [Details](https://mock.test/run/1)'};
   const lookalikeReceiptComment = {user:{login:'nikejshah',type:'User'},body:receiptComment.body};
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head')).filter(p=>p.url.includes('/statuses/')).length,1);
@@ -294,6 +318,9 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   const paginatedReceipt = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{comments:[[lookalikeReceiptComment],[receiptComment]]});
   assert.equal(paginatedReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'trusted receipt lookup follows bounded comment pagination');
   assert.equal(paginatedReceipt.filter(p=>p.url.includes('/statuses/')).length,1, 'paginated trusted receipt still preserves the required status');
+  const actualPrimaryReceipt = await primaryThenCompanionTest();
+  assert.equal(actualPrimaryReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'companion recognizes the actual trusted primary publisher receipt');
+  assert.equal(actualPrimaryReceipt.filter(p=>p.url.includes('/statuses/')).length,1, 'companion still publishes the required failure status after a primary receipt');
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'outsider')).length,0, 'non-owner rerun actors cannot publish failure receipts');
   for(const primary of [false,true]) {
     const run = (actor,job) => companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,actor,job,primary);
