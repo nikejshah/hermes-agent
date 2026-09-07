@@ -122,7 +122,23 @@ jobs:
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
             return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
           };
-          const currentReceiptAlreadyPublished = async (head) => {
+          const receiptMarker = `<!-- claude-review-failed-run:${failedRunId} -->`;
+          const receiptCommentAlreadyPublished = async (prNumber) => {
+            let url = `${apiUrl}/repos/${repository}/issues/${prNumber}/comments?per_page=100`;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Issue comment pagination exceeds the failed-run receipt bound");
+              const { data, link } = await requestJson(url);
+              if (!Array.isArray(data)) throw new Error("Issue comment response is malformed");
+              if (data.some((comment) =>
+                comment?.user?.login === "github-actions[bot]" &&
+                typeof comment.body === "string" &&
+                comment.body.includes(receiptMarker) &&
+                comment.body.includes(detailsUrl))) return true;
+              url = nextPage(link);
+            }
+            return false;
+          };
+          const failureStatusAlreadyPublished = async (head) => {
             let url = `${apiUrl}/repos/${repository}/commits/${head}/statuses?per_page=100`;
             for (let pages = 0; url; pages += 1) {
               if (pages >= 10) throw new Error("Commit status pagination exceeds the failed-run receipt bound");
@@ -154,16 +170,16 @@ jobs:
             }
 
             if (!resolved.head || !resolved.base) {
-              await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, {
-                body: `Claude review receipt: **FAIL**. The ${failedEvent} workflow ended with ${failedConclusion} before resolving an exact PR base and head, so no commit status was written. [Details](${detailsUrl})`,
-              });
+              if (!(await receiptCommentAlreadyPublished(resolved.prNumber))) {
+                await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, {
+                  body: `${receiptMarker}\nClaude review receipt: **FAIL**. The ${failedEvent} workflow ended with ${failedConclusion} before resolving an exact PR base and head, so no commit status was written. [Details](${detailsUrl})`,
+                });
+              }
               return;
             }
 
-            if (await currentReceiptAlreadyPublished(resolved.head)) {
-              console.log("Terminal failure receipt already published by the primary workflow.");
-              return;
-            }
+            const commentAlreadyPublished = await receiptCommentAlreadyPublished(resolved.prNumber);
+            const statusAlreadyPublished = await failureStatusAlreadyPublished(resolved.head);
 
             const live = await currentPrRefs(resolved.prNumber);
             let supersededReason = "";
@@ -182,10 +198,12 @@ jobs:
             }
 
             const body = supersededReason
-              ? `Claude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion}, but this result is superseded because ${supersededReason}; no commit status was written. [Details](${detailsUrl})`
-              : `Claude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion} before a terminal receipt was published. [Details](${detailsUrl})`;
-            await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, { body });
-            if (!supersededReason) {
+              ? `${receiptMarker}\nClaude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion}, but this result is superseded because ${supersededReason}; no commit status was written. [Details](${detailsUrl})`
+              : `${receiptMarker}\nClaude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion} before a terminal receipt was published. [Details](${detailsUrl})`;
+            if (!commentAlreadyPublished) {
+              await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, { body });
+            }
+            if (!supersededReason && !statusAlreadyPublished) {
               await post(`/repos/${repository}/statuses/${resolved.head}`, {
                 state: "failure",
                 context: "factory-os/claude-review",
@@ -198,4 +216,3 @@ jobs:
             process.exitCode = 1;
           });
           NODE
-

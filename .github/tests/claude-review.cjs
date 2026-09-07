@@ -166,6 +166,13 @@ function receiptTest(payload, outcome='success', env={}) {
 }
 async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActor=null,newerJob=true,primary=false,triggeringActor='nikejshah',extra={}) {
   const posts=[];
+  const paged = (items, page, linkBase, forceNext=false) => {
+    const pages = Array.isArray(items?.[0]) ? items : [items];
+    const body = pages[Math.min(page - 1, pages.length - 1)] || [];
+    const hasNext = forceNext || page < pages.length;
+    const link = hasNext ? `<${linkBase}${linkBase.includes('?')?'&':'?'}page=${page+1}>; rel="next"` : '';
+    return {body, link};
+  };
   const liveResponses = extra.liveSequence ? [...extra.liveSequence] : null;
   const newerSequence = extra.newerSequence ? [...extra.newerSequence] : null;
   let pullReads = 0;
@@ -173,6 +180,11 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
     if(requestOptions.method==='POST'){posts.push({url,body:JSON.parse(requestOptions.body)});return {ok:true};}
     const exactJob = `claude-review-pr-4-base-${base}-head-${head}`;
     if (url.includes('/statuses?')) return {ok:true,json:async()=>extra.statuses || [],headers:{get:()=>''}};
+    if (url.includes('/issues/4/comments?')) {
+      const page = Number(new URL(url).searchParams.get('page') || '1');
+      const result = paged(extra.comments || [], page, 'https://mock.test/repos/owner/repo/issues/4/comments?per_page=100', extra.commentOverBound);
+      return {ok:true,json:async()=>result.body,headers:{get:()=>result.link}};
+    }
     if (url.includes('/pulls?')) return {ok:!extra.pullListError,status:extra.pullListError?503:200,json:async()=>extra.openPulls || [{number:4,base:{sha:base},head:{sha:head}}],headers:{get:()=>''}};
     if (url.includes('/pulls/5')) return {ok:true,json:async()=>extra.live5 || {state:'open',number:5,base:{sha:nextBase},head:{sha:head}},headers:{get:()=>''}};
     const liveData = () => {
@@ -251,6 +263,8 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:base,summary:'ok',report:''}).result.state,'failure');
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''},'failure').result.state,'failure');
   const exactJob = `claude-review-pr-4-base-${base}-head-${head}`;
+  const receiptComment = {user:{login:'github-actions[bot]',type:'Bot'},body:'<!-- claude-review-failed-run:1 -->\nClaude review receipt: **FAIL** [Details](https://mock.test/run/1)'};
+  const lookalikeReceiptComment = {user:{login:'nikejshah',type:'User'},body:receiptComment.body};
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head')).filter(p=>p.url.includes('/statuses/')).length,1);
   assert.equal((await companionTest(null,'Claude review PR #4 @ resolve-head')).filter(p=>p.url.includes('/statuses/')).length,0);
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',base,base)).filter(p=>p.url.includes('/statuses/')).length,0);
@@ -271,6 +285,15 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   assert.equal(companionOlderRunStopsScan.filter(p=>p.url.includes('/statuses/')).length,1, 'failed-run companion newer-run scan stops once descending history reaches the failed run');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary PASS fails closed when the newer-run scan fails');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'failed-run companion keeps failure publication when the newer-run scan fails');
+  const primaryCommentNoStatus = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{comments:[receiptComment]});
+  assert.equal(primaryCommentNoStatus.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'trusted primary receipt comment suppresses only the duplicate comment');
+  assert.equal(primaryCommentNoStatus.filter(p=>p.url.includes('/statuses/')).length,1, 'trusted primary receipt comment does not suppress the required failure status');
+  const lookalikeComment = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{comments:[lookalikeReceiptComment]});
+  assert.equal(lookalikeComment.filter(p=>p.url.includes('/issues/4/comments')).length,1, 'untrusted lookalike receipt cannot suppress the failure comment');
+  assert.equal(lookalikeComment.filter(p=>p.url.includes('/statuses/')).length,1, 'untrusted lookalike receipt cannot suppress the failure status');
+  const paginatedReceipt = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{comments:[[lookalikeReceiptComment],[receiptComment]]});
+  assert.equal(paginatedReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'trusted receipt lookup follows bounded comment pagination');
+  assert.equal(paginatedReceipt.filter(p=>p.url.includes('/statuses/')).length,1, 'paginated trusted receipt still preserves the required status');
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'outsider')).length,0, 'non-owner rerun actors cannot publish failure receipts');
   for(const primary of [false,true]) {
     const run = (actor,job) => companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,actor,job,primary);
