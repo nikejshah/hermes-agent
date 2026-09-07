@@ -129,18 +129,28 @@ jobs:
           };
           const newerExactPassStatusRunId = async (prNumber, base, head) => {
             const expectedDescription = `PASS base ${base} head ${head}`;
-            let newest = 0n;
+            const latestStatusByRunId = new Map();
             let url = `${apiUrl}/repos/${repository}/commits/${head}/statuses?per_page=100`;
             for (let pages = 0; url; pages += 1) {
               if (pages >= 10) throw new Error("Commit status pagination exceeds the failed-run receipt bound");
               const { data, link } = await requestJson(url);
               if (!Array.isArray(data)) throw new Error("Commit status response is malformed");
               for (const status of data) {
-                if (status.context !== "factory-os/claude-review" || status.state !== "success" || status.description !== expectedDescription) continue;
+                if (status.context !== "factory-os/claude-review") continue;
                 const runId = runIdFromDetailsUrl(status.target_url);
-                if (runId > BigInt(failedRunId) && runId > newest && await runIsOwnerTriggeredExactReview(runId, prNumber, base, head)) newest = runId;
+                if (runId <= BigInt(failedRunId)) continue;
+                const key = runId.toString();
+                if (!latestStatusByRunId.has(key)) latestStatusByRunId.set(key, status);
               }
               url = nextPage(link);
+            }
+            let newest = 0n;
+            for (const [key, status] of latestStatusByRunId.entries()) {
+              const runId = BigInt(key);
+              if (status.state === "success" && status.description === expectedDescription &&
+                  runId > newest && await runIsOwnerTriggeredExactReview(runId, prNumber, base, head)) {
+                newest = runId;
+              }
             }
             if (newest === 0n) return 0n;
             const { data: live } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);

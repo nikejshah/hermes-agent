@@ -71,11 +71,14 @@ status unchanged. PASS statuses include the full reviewed base and head in the
 status description, so the push invalidation job can avoid overwriting a newer
 valid PASS for the current base/head. The primary receipt publisher also
 revalidates the live PR base and head immediately after writing a PASS status;
-if the base or head changed, a newer owner-triggered exact review appeared, the head is shared by another open PR with a different base, or that revalidation fails, it writes a failure
-status and correction receipt requiring a fresh owner review. Before or after
-publishing an older failure status, the publishers also check for a newer
-owner-triggered exact-head PASS status and preserve or restore it; this is a
-guarded repair, not a GitHub atomic compare-and-set. Active run
+if the base or head changed, a newer owner-triggered exact review appeared, the
+head is shared by another open PR with a different base, or that revalidation
+fails, it writes a failure status and correction receipt requiring a fresh
+owner review. Before or after publishing an older failure status, the
+publishers also check for a newer owner-triggered exact-head PASS status and
+preserve or restore it only when that newer run's latest shared review status
+is still the exact PASS; this is a guarded repair, not a GitHub atomic
+compare-and-set. Active run
 cancellation is deliberately not attempted; freshness is enforced by
 exact-base/exact-head receipts plus live PR base and head checks.
 
@@ -103,7 +106,10 @@ Run `node .github/tests/claude-review.cjs` to execute the actual inline policy,
 packet, receipt, and failed-run scripts with synthetic inputs and mocked GitHub
 responses. The test covers base-branch status invalidation, unrelated pushes,
 no-open-PR pushes, live base/head races, delayed invalidation after a fresh
-valid PASS, shared-head ambiguity invalidation, paginated PR/status lookup, bounded newer-run scans, untrusted focus framing, post-publication PASS revalidation including newer exact-run races, diverged diffs, packet bounds,
+valid PASS, shared-head ambiguity invalidation, paginated PR/status lookup,
+bounded newer-run scans, untrusted focus framing, post-publication PASS
+revalidation including newer exact-run races and stale same-run PASS history,
+diverged diffs, packet bounds,
 binary rejection, ancestor policy loading, malformed changed paths, empty BLOCK
 reports, wrong-base and wrong-head receipts, unresolved failures, base/head
 drift, and stale exact-base/exact-head status suppression. Changed-file metadata
