@@ -357,7 +357,7 @@ async function primaryThenCompanionTest() {
   assert.equal(paginatedReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'trusted receipt lookup follows bounded comment pagination');
   assert.equal(paginatedReceipt.filter(p=>p.url.includes('/statuses/')).length,1, 'paginated trusted receipt still preserves the required status');
   const actualPrimaryReceipt = await primaryThenCompanionTest();
-  assert.equal(actualPrimaryReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'companion recognizes the actual trusted primary publisher receipt');
+  assert.equal(actualPrimaryReceipt.filter(p=>p.url.includes('/issues/4/comments')).length,1, 'a primary PASS receipt cannot suppress the required failure explanation');
   assert.equal(actualPrimaryReceipt.filter(p=>p.url.includes('/statuses/')).length,1, 'companion still publishes the required failure status after a primary receipt');
   assert.equal((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'outsider')).length,0, 'non-owner rerun actors cannot publish failure receipts');
   for(const primary of [false,true]) {

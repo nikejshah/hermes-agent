@@ -201,7 +201,7 @@ jobs:
                 if (comment?.user?.login !== "github-actions[bot]" || typeof comment.body !== "string") return false;
                 if (comment.body.includes(receiptMarker) && comment.body.includes(`[Details](${detailsUrl})`)) return true;
                 return Boolean(base && head &&
-                  /Claude review (?:receipt|correction):/.test(comment.body) &&
+                  /Claude review (?:receipt|correction):\s*\*\*FAIL\*\*/.test(comment.body) &&
                   comment.body.includes(`base \`${base}\``) &&
                   comment.body.includes(`head \`${head}\``) &&
                   comment.body.includes(`[Details](${detailsUrl})`));
