@@ -13,15 +13,19 @@ Hardening applied for rollout:
   `nikejshah`, so the first setup PR can receive a real review before this
   workflow is on `main`; comment and manual reviews also run directly in the
   owner-triggered workflow run;
-- no `synchronize` trigger is enabled; later head changes require a fresh
-  owner-requested dispatch or comment review;
+- `pull_request.synchronize` runs only the status-only shared-head ambiguity check; model review remains limited to owner-opened, ready, reopened, base-edited, comment, or manual review paths;
+- pushes to a branch used as the base of open PRs run a status-only invalidation
+  job. That job never starts Claude; it marks the current PR head as needing a
+  fresh owner review when the base branch tip advances and the head already has
+  a factory review status, unless a valid PASS for the new exact base and
+  current head already exists and the head is not shared by another open PR with a different base. Open PR and status pagination are followed under bounds; known PR pages are processed before an overbound job fails closed;
 - `anthropics/claude-code-action/base-action` v1 is pinned to the resolved v1
   tag commit recorded in the workflow; the full GitHub agent wrapper is not
   used and there is no PR checkout action;
 - unused `id-token: write`, repository write, and bot-dispatch paths were
   removed;
-- exact PR-head checks, a bounded static GitHub API diff packet, untrusted
-  changed-file boundary, no PR checkout, no Claude tools/project settings/hooks
+- exact PR-head checks, a bounded static GitHub API diff packet, trusted repository fullname in the packet, untrusted
+  review-focus and changed-file boundaries, no PR checkout, no Claude tools/project settings/hooks
   or MCP, and fail-closed receipts are preserved.
 
 The workflow is self-contained: it uses GitHub CLI and Node.js to fetch and
@@ -60,13 +64,16 @@ the reviewed PR, base and head from the exact review job name. If a run fails
 before resolving an exact base and head, it may post a PR-level failure receipt
 but will not write a commit status or claim that the latest SHA was reviewed.
 Stale or superseded exact-base/exact-head runs also leave the shared commit
-status unchanged. Active run cancellation is deliberately not attempted;
-freshness is enforced by exact-base/exact-head receipts plus live PR base and
-head checks.
+status unchanged. PASS statuses include the full reviewed base and head in the
+status description, so the push invalidation job can avoid overwriting a newer
+valid PASS for the current base/head. The primary receipt publisher also
+revalidates the live PR base and head immediately after writing a PASS status;
+if the base or head changed, a newer owner-triggered exact review appeared, the head is shared by another open PR with a different base, or that revalidation fails, it writes a failure
+status and correction receipt requiring a fresh owner review. Active run
+cancellation is deliberately not attempted; freshness is enforced by
+exact-base/exact-head receipts plus live PR base and head checks.
 
-This bundle is local only. Installing it creates workflows that can post review
-comments and commit statuses when triggered by `nikejshah`, but the template
-itself performs no dispatch, secret read, or GitHub write.
+This template copy is local until installed. Once merged into a repository default branch, the installed workflows can react to the configured events, read the configured Claude OAuth secret in the review job, and post review comments or commit statuses under the hardcoded `nikejshah` operator policy. Keep that owner value only for `nikejshah/*` repositories or after separately verifying the same intended operator boundary.
 
 The receipt schema requires a report field up to 12000 characters. BLOCK
 receipts include that report so actionable file/line findings remain visible;
@@ -77,8 +84,10 @@ log-redaction system.
 
 Run `node .github/tests/claude-review.cjs` to execute the actual inline policy,
 packet, receipt, and failed-run scripts with synthetic inputs and mocked GitHub
-responses. The test covers diverged diffs, packet bounds, binary rejection,
-ancestor policy loading, malformed changed paths, empty BLOCK reports,
-wrong-base and wrong-head receipts, unresolved failures, base/head drift, and
-stale exact-base/exact-head status suppression. Changed-file metadata omits
-duplicate patches; the complete diff appears once.
+responses. The test covers base-branch status invalidation, unrelated pushes,
+no-open-PR pushes, live base/head races, delayed invalidation after a fresh
+valid PASS, shared-head ambiguity invalidation, paginated PR/status lookup, bounded newer-run scans, untrusted focus framing, post-publication PASS revalidation including newer exact-run races, diverged diffs, packet bounds,
+binary rejection, ancestor policy loading, malformed changed paths, empty BLOCK
+reports, wrong-base and wrong-head receipts, unresolved failures, base/head
+drift, and stale exact-base/exact-head status suppression. Changed-file metadata
+omits duplicate patches; the complete diff appears once.

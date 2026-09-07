@@ -64,7 +64,8 @@ jobs:
           };
           const parseFromExactJob = async () => {
             let url = `${apiUrl}/repos/${repository}/actions/runs/${failedRunId}/jobs?per_page=100`;
-            while (url) {
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Workflow job pagination exceeds the failed-run receipt bound");
               const { data, link } = await requestJson(url);
               for (const job of data.jobs || []) {
                 const match = /^claude-review-pr-([1-9][0-9]*)-base-([0-9a-f]{40})-head-([0-9a-f]{40})$/.exec(job.name || "");
@@ -86,7 +87,8 @@ jobs:
           const runHasExactReviewJob = async (runId, prNumber, base, head) => {
             const exactJobName = `claude-review-pr-${prNumber}-base-${base}-head-${head}`;
             let url = `${apiUrl}/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`;
-            while (url) {
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Workflow job pagination exceeds the supersession scan bound");
               const { data, link } = await requestJson(url);
               if ((data.jobs || []).some((job) => job.name === exactJobName)) return true;
               url = nextPage(link);
@@ -97,12 +99,14 @@ jobs:
             let url = `${apiUrl}/repos/${repository}/actions/workflows/claude.yml/runs?per_page=100`;
             let latest = 0n;
             const baselineRunId = BigInt(failedRunId);
-            while (url) {
+            const maxPages = 10;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= maxPages) throw new Error("Workflow run pagination exceeds the supersession scan bound");
               const { data, link } = await requestJson(url);
               for (const run of data.workflow_runs || []) {
                 if (!/^\d+$/.test(String(run.id))) continue;
                 const runId = BigInt(run.id);
-                if (runId <= baselineRunId) continue;
+                if (runId <= baselineRunId) return latest;
                 const actor = run.actor?.login || "";
                 const triggeringActor = run.triggering_actor?.login || "";
                 const ownerTriggered = actor === "nikejshah" && triggeringActor === "nikejshah";
@@ -119,11 +123,18 @@ jobs:
             return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
           };
           const currentReceiptAlreadyPublished = async (head) => {
-            const { data } = await requestJson(`${apiUrl}/repos/${repository}/commits/${head}/status`);
-            return (data.statuses || []).some((status) =>
-              status.context === "factory-os/claude-review" &&
-              status.state === "failure" &&
-              status.target_url === detailsUrl);
+            let url = `${apiUrl}/repos/${repository}/commits/${head}/statuses?per_page=100`;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Commit status pagination exceeds the failed-run receipt bound");
+              const { data, link } = await requestJson(url);
+              if (!Array.isArray(data)) throw new Error("Commit status response is malformed");
+              if (data.some((status) =>
+                status.context === "factory-os/claude-review" &&
+                status.state === "failure" &&
+                status.target_url === detailsUrl)) return true;
+              url = nextPage(link);
+            }
+            return false;
           };
 
           (async () => {
@@ -161,9 +172,13 @@ jobs:
             } else if (live.base !== resolved.base) {
               supersededReason = `the PR base is now ${live.base || "unknown"}`;
             }
-            const latestRunId = await latestSameBaseHeadRunId(resolved.prNumber, resolved.base, resolved.head);
-            if (!supersededReason && latestRunId > BigInt(failedRunId)) {
-              supersededReason = `a newer same-base/head review run ${latestRunId.toString()} exists`;
+            try {
+              const latestRunId = await latestSameBaseHeadRunId(resolved.prNumber, resolved.base, resolved.head);
+              if (!supersededReason && latestRunId > BigInt(failedRunId)) {
+                supersededReason = `a newer same-base/head review run ${latestRunId.toString()} exists`;
+              }
+            } catch (error) {
+              console.log(`Continuing failed-run publication after newer-run scan failure: ${error.message}`);
             }
 
             const body = supersededReason
