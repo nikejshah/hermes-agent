@@ -9,9 +9,10 @@ Hardening applied for rollout:
   protect trigger paths, but anyone with repository workflow-write access could
   alter workflow code and must be trusted before the OAuth secret is installed;
 - a bootstrap `pull_request` run covers only non-draft, same-repository PRs
-  opened, marked ready, or reopened by `nikejshah`, so the first setup PR can
-  receive a real review before this workflow is on `main`; comment and manual
-  reviews also run directly in the owner-triggered workflow run;
+  opened, marked ready, reopened, or edited to change the base branch by
+  `nikejshah`, so the first setup PR can receive a real review before this
+  workflow is on `main`; comment and manual reviews also run directly in the
+  owner-triggered workflow run;
 - no `synchronize` trigger is enabled; later head changes require a fresh
   owner-requested dispatch or comment review;
 - `anthropics/claude-code-action/base-action` v1 is pinned to the resolved v1
@@ -24,13 +25,14 @@ Hardening applied for rollout:
   or MCP, and fail-closed receipts are preserved.
 
 The workflow is self-contained: it uses GitHub CLI and Node.js to fetch and
-validate exact-head metadata plus the complete unified diff media response
-from the trusted GitHub API. It fails closed when the response may be
+validate exact-base/exact-head metadata plus the complete unified diff media
+response from the trusted GitHub API. It fails closed when the response may be
 truncated, contains binary changes, or exceeds the 800000-byte prompt-file
-safety bound. The trusted base `AGENTS.md` policy is included only when it is
-12000 bytes or smaller. If a repository has no `AGENTS.md` at the trusted base,
-the packet contains an explicit no-policy contract instead of silently omitting
-or truncating policy text.
+safety bound. The trusted base `AGENTS.md` policy packet includes root and
+changed-file ancestor `AGENTS.md` files that exist at the trusted base, with
+path depth, candidate count and total bytes bounded. If no applicable
+`AGENTS.md` exists at the trusted base, the packet contains an explicit
+no-policy contract instead of silently omitting or truncating policy text.
 
 No PR code is checked out or executed. The prompt packet is written to a trusted
 `RUNNER_TEMP` file and passed through the official pinned `base-action`
@@ -54,13 +56,13 @@ The companion listens for the workflow name `Claude Code Review` and the
 canonical workflow filename `claude.yml`; keep that filename when installing.
 It covers failed or cancelled owner-triggered manual, comment, and bootstrap
 pull-request runs after the workflow exists on the default branch. It derives
-the reviewed PR and head from the exact review job name when available, or from
-an exact manual-dispatch title. If a run fails before resolving an exact head,
-it may post a PR-level failure receipt but will not write a commit status or
-claim that the latest SHA was reviewed. Stale or superseded exact-head runs also
-leave the shared commit status unchanged. Active run cancellation is deliberately
-not attempted; freshness is enforced by exact-head receipts and live PR-head
-checks.
+the reviewed PR, base and head from the exact review job name. If a run fails
+before resolving an exact base and head, it may post a PR-level failure receipt
+but will not write a commit status or claim that the latest SHA was reviewed.
+Stale or superseded exact-base/exact-head runs also leave the shared commit
+status unchanged. Active run cancellation is deliberately not attempted;
+freshness is enforced by exact-base/exact-head receipts plus live PR base and
+head checks.
 
 This bundle is local only. Installing it creates workflows that can post review
 comments and commit statuses when triggered by `nikejshah`, but the template
@@ -73,8 +75,10 @@ quote credentials, tokens, private financial source text, or long private
 code/source excerpts in findings; this is a review instruction, not a universal
 log-redaction system.
 
-Run `node .github/tests/claude-review.cjs` to execute the actual inline packet,
-receipt, and failed-run scripts with synthetic inputs and mocked GitHub responses.
-The test covers diverged diffs, packet bounds, binary rejection, empty BLOCK
-reports, wrong-head receipts, unresolved failures, and stale-head status suppression.
-Changed-file metadata omits duplicate patches; the complete diff appears once.
+Run `node .github/tests/claude-review.cjs` to execute the actual inline policy,
+packet, receipt, and failed-run scripts with synthetic inputs and mocked GitHub
+responses. The test covers diverged diffs, packet bounds, binary rejection,
+ancestor policy loading, malformed changed paths, empty BLOCK reports,
+wrong-base and wrong-head receipts, unresolved failures, base/head drift, and
+stale exact-base/exact-head status suppression. Changed-file metadata omits
+duplicate patches; the complete diff appears once.
