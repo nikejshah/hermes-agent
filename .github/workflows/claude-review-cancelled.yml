@@ -143,6 +143,8 @@ jobs:
               url = nextPage(link);
             }
             if (newest === 0n) return 0n;
+            const { data: live } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
+            if (live?.head?.sha !== head || live?.base?.sha !== base) return 0n;
             const latestRunId = await latestSameBaseHeadRunId(prNumber, base, head);
             return latestRunId === newest ? newest : 0n;
           };

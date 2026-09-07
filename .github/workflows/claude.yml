@@ -872,6 +872,8 @@ jobs:
                 url = nextPage(link);
               }
               if (newest === 0n) return 0n;
+              const live = await currentPrRefs();
+              if (live.head !== expectedHead || live.base !== expectedBase) return 0n;
               const latestRunId = await latestSameBaseHeadRunId();
               return latestRunId === newest ? newest : 0n;
             };
@@ -996,7 +998,19 @@ jobs:
                     }
                     const latestAfterPublishRunId = await latestSameBaseHeadRunId();
                     if (!revalidationFailure && latestAfterPublishRunId > BigInt(currentRunId)) {
-                      revalidationFailure = `a newer same-base/head review run ${latestAfterPublishRunId.toString()} exists`;
+                      const newerPassRunId = await newerExactPassStatusRunId();
+                      if (newerPassRunId > 0n) {
+                        await post(`/repos/${repository}/statuses/${expectedHead}`, {
+                          state: "success",
+                          context: "factory-os/claude-review",
+                          description: `PASS base ${expectedBase} head ${expectedHead}`,
+                          target_url: `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}/actions/runs/${newerPassRunId.toString()}`,
+                        });
+                        const superseded = { ...effectiveResult, superseded_by_review_run: newerPassRunId.toString() };
+                        process.stdout.write(`${JSON.stringify(superseded)}\n`);
+                        return;
+                      }
+                      revalidationFailure = `a newer same-base/head review run ${latestAfterPublishRunId.toString()} exists without a verified exact PASS status`;
                     }
                     const ambiguous = await ambiguousOpenPrForHead(expectedHead, Number(prNumber), expectedBase);
                     if (!revalidationFailure && ambiguous) {

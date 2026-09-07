@@ -223,9 +223,9 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
       if (!live) return {ok:false,status:503,json:async()=>({}),headers:{get:()=>''}};
       return {ok:true,json:async()=>live,headers:{get:()=>''}};
     }
-    const workflowActor = newerSequence ? newerSequence.shift() : newerActor;
     if (url.includes('/workflows/') && extra.workflowError) return {ok:false,status:503,json:async()=>({}),headers:{get:()=>''}};
     if (url.includes('/workflows/') && url.includes('page=2') && extra.failWorkflowPage2) throw new Error('followed older workflow run page');
+    const workflowActor = url.includes('/workflows/') ? (newerSequence ? newerSequence.shift() : newerActor) : null;
     const workflowRuns = workflowActor === 'older' ? [{id:1,actor:{login:'nikejshah'},triggering_actor:{login:'nikejshah'},display_title:`Claude review PR #4 @ ${head}`}] : workflowActor ? [{id:2,actor:{login:workflowActor},triggering_actor:{login:workflowActor},display_title:`Claude review PR #4 @ ${head}`}] : [];
     const data=url.includes('/runs/2/jobs?')?{jobs:newerJob?[{name:exactJob}]:[]}:url.includes('/jobs?')?{jobs:jobName?[{name:jobName}]:[]}:url.includes('/workflows/')?{workflow_runs:workflowRuns}:url.includes('/commits/')?[]: liveData();
     return {ok:true,json:async()=>data,headers:{get:()=>url.includes('/workflows/') && extra.workflowLink ? extra.workflowLink : ''}};
@@ -297,6 +297,7 @@ async function primaryThenCompanionTest() {
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:base,summary:'ok',report:''}).result.state,'failure');
   assert.equal(receiptTest({verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''},'failure').result.state,'failure');
   const exactJob = `claude-review-pr-4-base-${base}-head-${head}`;
+  const newerPassStatus = {context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`,target_url:'https://mock.test/owner/repo/actions/runs/2'};
   assert.equal((await pendingGuardTest(false)).length,1, 'pending status is written when no newer exact-head owner run exists');
   assert.equal((await pendingGuardTest(true)).length,0, 'older reruns cannot overwrite a newer exact-head owner status with pending');
   const receiptComment = {user:{login:'github-actions[bot]',type:'Bot'},body:'<!-- claude-review-failed-run:1 -->\nClaude review receipt: **FAIL** [Details](https://mock.test/run/1)'};
@@ -311,8 +312,11 @@ async function primaryThenCompanionTest() {
   assert.deepEqual(raceStatuses, ['success','failure'], 'post-publication base drift replaces PASS with failure');
   const recheckFailure = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{failSecondPull:true});
   assert.deepEqual(recheckFailure.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['success','failure'], 'post-publication revalidation failure replaces PASS with failure');
-  const newerRunRace = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah']});
-  assert.deepEqual(newerRunRace.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['success','failure'], 'post-publication newer exact run replaces PASS with failure');
+  const newerRunWithoutPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[]]});
+  assert.deepEqual(newerRunWithoutPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['success','failure'], 'post-publication newer exact run without verified PASS replaces PASS with failure');
+  const newerRunRace = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[newerPassStatus]],recordPostedStatuses:true});
+  assert.deepEqual(newerRunRace.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['success','success'], 'post-publication newer exact PASS restores newer run instead of replacing it with failure');
+  assert.equal(newerRunRace.at(-1).body.target_url.endsWith('/actions/runs/2'), true, 'restored PASS status points at the newer exact review run');
   const ambiguousPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{openPulls:[{number:4,base:{sha:base},head:{sha:head}},{number:5,base:{sha:nextBase},head:{sha:head}}]});
   assert.deepEqual(ambiguousPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary PASS fails closed when another open PR shares the head with a different base');
   const olderRunStopsScan = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'older',true,true,'nikejshah',{workflowLink:'<https://mock.test/repos/owner/repo/actions/workflows/claude.yml/runs?per_page=100&page=2>; rel="next"',failWorkflowPage2:true});
@@ -321,7 +325,6 @@ async function primaryThenCompanionTest() {
   assert.equal(companionOlderRunStopsScan.filter(p=>p.url.includes('/statuses/')).length,1, 'failed-run companion newer-run scan stops once descending history reaches the failed run');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary PASS fails closed when the newer-run scan fails');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'failed-run companion keeps failure publication when the newer-run scan fails');
-  const newerPassStatus = {context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`,target_url:'https://mock.test/owner/repo/actions/runs/2'};
   const primaryOlderFailureSeesNewerPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'nikejshah',true,true,'nikejshah',{statuses:[newerPassStatus],actionOutcome:'failure'});
   assert.deepEqual(primaryOlderFailureSeesNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), [], 'primary older failure does not overwrite an already published newer PASS status');
   assert.equal(primaryOlderFailureSeesNewerPass.some(p=>p.url.includes('/issues/4/comments') && p.body.body.includes('superseded because')), true, 'primary older failure comments as superseded when preserving newer PASS');
@@ -330,6 +333,8 @@ async function primaryThenCompanionTest() {
   assert.equal(companionOlderFailureSeesNewerPass.some(p=>p.url.includes('/issues/4/comments') && p.body.body.includes('superseded because')), true, 'companion older failure comments as superseded when preserving newer PASS');
   const primaryOlderFailureRestoresNewerPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure'});
   assert.deepEqual(primaryOlderFailureRestoresNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure','success'], 'primary older failure restores a newer PASS that appears after the pre-publication scan');
+  const primaryOlderFailureDoesNotRestoreAfterBaseMove = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure',liveSequence:[{base:{sha:base},head:{sha:head}},{base:{sha:nextBase},head:{sha:head}}]});
+  assert.deepEqual(primaryOlderFailureDoesNotRestoreAfterBaseMove.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'older failure does not restore a newer PASS after the PR base moves');
   const untrustedPassStatusRun = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{statusSequence:[[newerPassStatus],[newerPassStatus]],passRunActor:'outsider',actionOutcome:'failure'});
   assert.deepEqual(untrustedPassStatusRun.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'newer PASS status must point to an owner-triggered exact review run before it can suppress or restore');
   const companionOlderFailureSkipsNewerExactRun = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'nikejshah',true,false,'nikejshah',{statusSequence:[[],[]]});
