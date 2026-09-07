@@ -190,10 +190,21 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   const liveResponses = extra.liveSequence ? [...extra.liveSequence] : null;
   const newerSequence = extra.newerSequence ? [...extra.newerSequence] : null;
   let pullReads = 0;
-  await vm.runInNewContext(primary ? receipt : companionReceipt,{require:()=>fs,console:{error:()=>{},log:()=>{}},process:{stdout:{write:()=>{}},env:{EXPECTED_BASE:base,EXPECTED_HEAD:head,PR_NUMBER:'4',CURRENT_RUN_ID:'1',ACTION_OUTCOME:'success',STRUCTURED_OUTPUT:JSON.stringify({verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''}),GITHUB_API_URL:'https://mock.test',GITHUB_REPOSITORY:'owner/repo',DISPLAY_TITLE:title,DETAILS_URL:'https://mock.test/run/1',FAILED_RUN_ID:'1',FAILED_EVENT:'pull_request',FAILED_CONCLUSION:'failure',RUN_ACTOR:'nikejshah',TRIGGERING_ACTOR:triggeringActor}} ,fetch:async(url,requestOptions={})=>{
-    if(requestOptions.method==='POST'){posts.push({url,body:JSON.parse(requestOptions.body)});return {ok:true};}
+  await vm.runInNewContext(primary ? receipt : companionReceipt,{require:()=>fs,console:{error:()=>{},log:()=>{}},process:{stdout:{write:()=>{}},env:{EXPECTED_BASE:base,EXPECTED_HEAD:head,PR_NUMBER:'4',CURRENT_RUN_ID:'1',ACTION_OUTCOME:extra.actionOutcome || 'success',STRUCTURED_OUTPUT:JSON.stringify(extra.structuredPayload || {verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''}),GITHUB_API_URL:'https://mock.test',GITHUB_REPOSITORY:'owner/repo',DISPLAY_TITLE:title,DETAILS_URL:'https://mock.test/run/1',FAILED_RUN_ID:'1',FAILED_EVENT:'pull_request',FAILED_CONCLUSION:'failure',RUN_ACTOR:'nikejshah',TRIGGERING_ACTOR:triggeringActor}} ,fetch:async(url,requestOptions={})=>{
+    if(requestOptions.method==='POST'){
+      const body = JSON.parse(requestOptions.body);
+      posts.push({url,body});
+      if (extra.recordPostedStatuses && url.includes('/statuses/') && extra.statusSequence) {
+        const recorded = {context:body.context,state:body.state,description:body.description,target_url:body.target_url};
+        for (const page of extra.statusSequence) if (Array.isArray(page)) page.unshift(recorded);
+      }
+      return {ok:true};
+    }
     const exactJob = `claude-review-pr-4-base-${base}-head-${head}`;
-    if (url.includes('/statuses?')) return {ok:true,json:async()=>extra.statuses || [],headers:{get:()=>''}};
+    if (url.includes('/statuses?')) {
+      const source = extra.statusSequence ? (extra.statusSequence.shift() ?? extra.statusSequence.at(-1) ?? []) : (extra.statuses || []);
+      return {ok:true,json:async()=>source,headers:{get:()=>''}};
+    }
     if (url.includes('/issues/4/comments?')) {
       const page = Number(new URL(url).searchParams.get('page') || '1');
       const result = paged(extra.comments || [], page, 'https://mock.test/repos/owner/repo/issues/4/comments?per_page=100', extra.commentOverBound);
@@ -206,6 +217,7 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
       if (extra.failSecondPull && pullReads === 2) return null;
       return liveResponses ? (liveResponses.shift() || liveResponses.at(-1) || {base:{sha:liveBase},head:{sha:liveHead}}) : {base:{sha:liveBase},head:{sha:liveHead}};
     };
+    if (/\/actions\/runs\/2$/.test(url)) return {ok:true,json:async()=>({id:2,actor:{login:extra.passRunActor || 'nikejshah'},triggering_actor:{login:extra.passRunTriggeringActor || 'nikejshah'}}),headers:{get:()=>''}};
     if (!url.includes('/runs/2/jobs?') && !url.includes('/jobs?') && !url.includes('/workflows/') && !url.includes('/commits/')) {
       const live = liveData();
       if (!live) return {ok:false,status:503,json:async()=>({}),headers:{get:()=>''}};
@@ -309,6 +321,19 @@ async function primaryThenCompanionTest() {
   assert.equal(companionOlderRunStopsScan.filter(p=>p.url.includes('/statuses/')).length,1, 'failed-run companion newer-run scan stops once descending history reaches the failed run');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary PASS fails closed when the newer-run scan fails');
   assert.deepEqual((await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{workflowError:true})).filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'failed-run companion keeps failure publication when the newer-run scan fails');
+  const newerPassStatus = {context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`,target_url:'https://mock.test/owner/repo/actions/runs/2'};
+  const primaryOlderFailureSeesNewerPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'nikejshah',true,true,'nikejshah',{statuses:[newerPassStatus],actionOutcome:'failure'});
+  assert.deepEqual(primaryOlderFailureSeesNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), [], 'primary older failure does not overwrite an already published newer PASS status');
+  assert.equal(primaryOlderFailureSeesNewerPass.some(p=>p.url.includes('/issues/4/comments') && p.body.body.includes('superseded because')), true, 'primary older failure comments as superseded when preserving newer PASS');
+  const companionOlderFailureSeesNewerPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'nikejshah',true,false,'nikejshah',{statuses:[newerPassStatus]});
+  assert.deepEqual(companionOlderFailureSeesNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), [], 'companion older failure does not overwrite an already published newer PASS status');
+  assert.equal(companionOlderFailureSeesNewerPass.some(p=>p.url.includes('/issues/4/comments') && p.body.body.includes('superseded because')), true, 'companion older failure comments as superseded when preserving newer PASS');
+  const primaryOlderFailureRestoresNewerPass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure'});
+  assert.deepEqual(primaryOlderFailureRestoresNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure','success'], 'primary older failure restores a newer PASS that appears after the pre-publication scan');
+  const untrustedPassStatusRun = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{statusSequence:[[newerPassStatus],[newerPassStatus]],passRunActor:'outsider',actionOutcome:'failure'});
+  assert.deepEqual(untrustedPassStatusRun.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'newer PASS status must point to an owner-triggered exact review run before it can suppress or restore');
+  const companionOlderFailureSkipsNewerExactRun = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,'nikejshah',true,false,'nikejshah',{statusSequence:[[],[]]});
+  assert.deepEqual(companionOlderFailureSkipsNewerExactRun.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), [], 'companion older failure leaves shared status untouched when a newer exact run exists');
   const primaryCommentNoStatus = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{comments:[receiptComment]});
   assert.equal(primaryCommentNoStatus.filter(p=>p.url.includes('/issues/4/comments')).length,0, 'trusted primary receipt comment suppresses only the duplicate comment');
   assert.equal(primaryCommentNoStatus.filter(p=>p.url.includes('/statuses/')).length,1, 'trusted primary receipt comment does not suppress the required failure status');

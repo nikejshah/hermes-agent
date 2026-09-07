@@ -72,7 +72,10 @@ status description, so the push invalidation job can avoid overwriting a newer
 valid PASS for the current base/head. The primary receipt publisher also
 revalidates the live PR base and head immediately after writing a PASS status;
 if the base or head changed, a newer owner-triggered exact review appeared, the head is shared by another open PR with a different base, or that revalidation fails, it writes a failure
-status and correction receipt requiring a fresh owner review. Active run
+status and correction receipt requiring a fresh owner review. Before or after
+publishing an older failure status, the publishers also check for a newer
+owner-triggered exact-head PASS status and preserve or restore it; this is a
+guarded repair, not a GitHub atomic compare-and-set. Active run
 cancellation is deliberately not attempted; freshness is enforced by
 exact-base/exact-head receipts plus live PR base and head checks.
 

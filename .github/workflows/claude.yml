@@ -847,6 +847,34 @@ jobs:
               }
               return latest;
             };
+            const runIdFromDetailsUrl = (value) => {
+              const match = /\/actions\/runs\/([0-9]+)(?:\b|\/|$)/.exec(String(value || ""));
+              return match ? BigInt(match[1]) : 0n;
+            };
+            const runIsOwnerTriggeredExactReview = async (runId) => {
+              const { data } = await requestJson(`${apiUrl}/repos/${repository}/actions/runs/${runId.toString()}`);
+              const ownerTriggered = data?.actor?.login === "nikejshah" && data?.triggering_actor?.login === "nikejshah";
+              return ownerTriggered && await runHasExactReviewJob(runId.toString());
+            };
+            const newerExactPassStatusRunId = async () => {
+              const expectedDescription = `PASS base ${expectedBase} head ${expectedHead}`;
+              let newest = 0n;
+              let url = `${apiUrl}/repos/${repository}/commits/${expectedHead}/statuses?per_page=100`;
+              for (let pages = 0; url; pages += 1) {
+                if (pages >= 10) throw new Error("Commit status pagination exceeds the supersession scan bound");
+                const { data, link } = await requestJson(url);
+                if (!Array.isArray(data)) throw new Error("Commit status response is malformed");
+                for (const status of data) {
+                  if (status.context !== "factory-os/claude-review" || status.state !== "success" || status.description !== expectedDescription) continue;
+                  const runId = runIdFromDetailsUrl(status.target_url);
+                  if (runId > BigInt(currentRunId) && runId > newest && await runIsOwnerTriggeredExactReview(runId)) newest = runId;
+                }
+                url = nextPage(link);
+              }
+              if (newest === 0n) return 0n;
+              const latestRunId = await latestSameBaseHeadRunId();
+              return latestRunId === newest ? newest : 0n;
+            };
             const currentPrRefs = async () => {
               const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
               return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
@@ -923,6 +951,14 @@ jobs:
                   effectiveResult = { ...result, state: "failure", description: effectiveDescription, comment_body: effectiveCommentBody, ambiguous_open_pr: ambiguous };
                 }
               }
+              if (!supersededReason && effectiveState === "failure") {
+                try {
+                  const newerPassRunId = await newerExactPassStatusRunId();
+                  if (newerPassRunId > 0n) supersededReason = `a newer same-base/head PASS status from review run ${newerPassRunId.toString()} exists`;
+                } catch (error) {
+                  console.log(`Continuing failure publication after newer-PASS status scan failure: ${error.message}`);
+                }
+              }
               const publishedComment = supersededReason
                 ? `${effectiveCommentBody}\n\nThis result is superseded because ${supersededReason}; the shared status was left unchanged.`
                 : effectiveCommentBody;
@@ -934,6 +970,21 @@ jobs:
                   description: effectiveDescription,
                   target_url: detailsUrl,
                 });
+                if (effectiveState !== "success") {
+                  try {
+                    const newerPassRunId = await newerExactPassStatusRunId();
+                    if (newerPassRunId > 0n) {
+                      await post(`/repos/${repository}/statuses/${expectedHead}`, {
+                        state: "success",
+                        context: "factory-os/claude-review",
+                        description: `PASS base ${expectedBase} head ${expectedHead}`,
+                        target_url: `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}/actions/runs/${newerPassRunId.toString()}`,
+                      });
+                    }
+                  } catch (error) {
+                    console.log(`Post-failure newer-PASS restoration check failed: ${error.message}`);
+                  }
+                }
                 if (effectiveState === "success") {
                   let revalidationFailure = "";
                   try {

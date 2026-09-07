@@ -118,6 +118,34 @@ jobs:
             }
             return latest;
           };
+          const runIdFromDetailsUrl = (value) => {
+            const match = /\/actions\/runs\/([0-9]+)(?:\b|\/|$)/.exec(String(value || ""));
+            return match ? BigInt(match[1]) : 0n;
+          };
+          const runIsOwnerTriggeredExactReview = async (runId, prNumber, base, head) => {
+            const { data } = await requestJson(`${apiUrl}/repos/${repository}/actions/runs/${runId.toString()}`);
+            const ownerTriggered = data?.actor?.login === "nikejshah" && data?.triggering_actor?.login === "nikejshah";
+            return ownerTriggered && await runHasExactReviewJob(runId.toString(), prNumber, base, head);
+          };
+          const newerExactPassStatusRunId = async (prNumber, base, head) => {
+            const expectedDescription = `PASS base ${base} head ${head}`;
+            let newest = 0n;
+            let url = `${apiUrl}/repos/${repository}/commits/${head}/statuses?per_page=100`;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) throw new Error("Commit status pagination exceeds the failed-run receipt bound");
+              const { data, link } = await requestJson(url);
+              if (!Array.isArray(data)) throw new Error("Commit status response is malformed");
+              for (const status of data) {
+                if (status.context !== "factory-os/claude-review" || status.state !== "success" || status.description !== expectedDescription) continue;
+                const runId = runIdFromDetailsUrl(status.target_url);
+                if (runId > BigInt(failedRunId) && runId > newest && await runIsOwnerTriggeredExactReview(runId, prNumber, base, head)) newest = runId;
+              }
+              url = nextPage(link);
+            }
+            if (newest === 0n) return 0n;
+            const latestRunId = await latestSameBaseHeadRunId(prNumber, base, head);
+            return latestRunId === newest ? newest : 0n;
+          };
           const currentPrRefs = async (prNumber) => {
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
             return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
@@ -201,6 +229,14 @@ jobs:
               console.log(`Continuing failed-run publication after newer-run scan failure: ${error.message}`);
             }
 
+            if (!supersededReason) {
+              try {
+                const newerPassRunId = await newerExactPassStatusRunId(resolved.prNumber, resolved.base, resolved.head);
+                if (newerPassRunId > 0n) supersededReason = `a newer same-base/head PASS status from review run ${newerPassRunId.toString()} exists`;
+              } catch (error) {
+                console.log(`Continuing failed-run publication after newer-PASS status scan failure: ${error.message}`);
+              }
+            }
             const body = supersededReason
               ? `${receiptMarker}\nClaude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion}, but this result is superseded because ${supersededReason}; no commit status was written. [Details](${detailsUrl})`
               : `${receiptMarker}\nClaude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion} before a terminal receipt was published. [Details](${detailsUrl})`;
@@ -214,6 +250,19 @@ jobs:
                 description: "Claude review workflow failed or was cancelled",
                 target_url: detailsUrl,
               });
+              try {
+                const newerPassRunId = await newerExactPassStatusRunId(resolved.prNumber, resolved.base, resolved.head);
+                if (newerPassRunId > 0n) {
+                  await post(`/repos/${repository}/statuses/${resolved.head}`, {
+                    state: "success",
+                    context: "factory-os/claude-review",
+                    description: `PASS base ${resolved.base} head ${resolved.head}`,
+                    target_url: `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}/actions/runs/${newerPassRunId.toString()}`,
+                  });
+                }
+              } catch (error) {
+                console.log(`Post-failure newer-PASS restoration check failed: ${error.message}`);
+              }
             }
           })().catch((error) => {
             console.error(`Failed to publish Claude failed-run receipt: ${error.message}`);
