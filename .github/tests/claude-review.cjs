@@ -79,6 +79,7 @@ async function invalidationTest(overrides={}) {
   const list = overrides.pulls ?? [{number:4,base:{sha:after},head:{sha:currentHead}}];
   const allPulls = overrides.allPulls ?? list;
   const statusList = overrides.statuses ?? [{context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${currentHead}`}];
+  const statusSequence = overrides.statusSequence ? [...overrides.statusSequence] : null;
   const live = overrides.live ?? {state:'open',number:4,user:{login:'nikejshah'},base:{ref:branch,sha:after},head:{sha:currentHead,repo:{full_name:'owner/repo'}}};
   const paged = (items, page, linkBase, forceNext=false) => {
     const pages = Array.isArray(items?.[0]) ? items : [items];
@@ -96,7 +97,8 @@ async function invalidationTest(overrides={}) {
       if (url.includes('/statuses?')) {
         if (overrides.statusError) return {ok:false,status:503,json:async()=>[],headers:{get:()=>''}};
         const page = Number(new URL(url).searchParams.get('page') || '1');
-        const result = paged(statusList, page, 'https://mock.test/repos/owner/repo/commits/x/statuses?per_page=100', overrides.statusOverBound);
+        const source = statusSequence ? (statusSequence.shift() ?? statusSequence.at(-1) ?? []) : statusList;
+        const result = paged(source, page, 'https://mock.test/repos/owner/repo/commits/x/statuses?per_page=100', overrides.statusOverBound);
         return {ok:true,json:async()=>result.body,headers:{get:()=>result.link}};
       }
       if (url.includes('/pulls?')) {
@@ -124,6 +126,8 @@ async function ambiguousInvalidationTest(overrides={}) {
   const live = overrides.live ?? {state:'open',number:4,base:{sha:base},head:{sha:head}};
   const pulls = overrides.pulls ?? [{number:4,base:{sha:base},head:{sha:head}},{number:5,base:{sha:nextBase},head:{sha:head}}];
   const statuses = overrides.statuses ?? [{context:'factory-os/claude-review',state:'success',description:`PASS base ${nextBase} head ${head}`}];
+  const statusSequence = overrides.statusSequence ? [...overrides.statusSequence] : null;
+  const pullSequence = overrides.pullSequence ? [...overrides.pullSequence] : null;
   const processMock = {env:{GITHUB_API_URL:'https://mock.test',GITHUB_REPOSITORY:'owner/repo',PR_NUMBER:'4',HEAD_SHA:head,BASE_SHA:base,DETAILS_URL:'https://mock.test/run/1',GITHUB_TOKEN:'token'},exitCode:undefined};
   const context = {
     process: processMock,
@@ -131,8 +135,14 @@ async function ambiguousInvalidationTest(overrides={}) {
     fetch: async (url, options={}) => {
       if (options.method === 'POST') { posts.push({url,body:JSON.parse(options.body)}); return {ok:true}; }
       if (url.includes('/pulls/4')) return {ok:true,json:async()=>live,headers:{get:()=>''}};
-      if (url.includes('/statuses?')) return {ok:!overrides.statusError,status:overrides.statusError?503:200,json:async()=>statuses,headers:{get:()=>''}};
-      if (url.includes('/pulls?')) return {ok:!overrides.pullError,status:overrides.pullError?503:200,json:async()=>pulls,headers:{get:()=>overrides.pullOverBound?'<https://mock.test/next>; rel="next"':''}};
+      if (url.includes('/statuses?')) {
+        const source = statusSequence ? (statusSequence.shift() ?? statusSequence.at(-1) ?? []) : statuses;
+        return {ok:!overrides.statusError,status:overrides.statusError?503:200,json:async()=>source,headers:{get:()=>''}};
+      }
+      if (url.includes('/pulls?')) {
+        const source = pullSequence ? (pullSequence.shift() ?? pullSequence.at(-1) ?? []) : pulls;
+        return {ok:!overrides.pullError,status:overrides.pullError?503:200,json:async()=>source,headers:{get:()=>overrides.pullOverBound?'<https://mock.test/next>; rel="next"':''}};
+      }
       throw new Error(`unexpected ${url}`);
     },
   };
@@ -188,6 +198,7 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
     return {body, link};
   };
   const liveResponses = extra.liveSequence ? [...extra.liveSequence] : null;
+  let lastLiveResponse = null;
   const newerSequence = extra.newerSequence ? [...extra.newerSequence] : null;
   let pullReads = 0;
   await vm.runInNewContext(primary ? receipt : companionReceipt,{require:()=>fs,console:{error:()=>{},log:()=>{}},process:{stdout:{write:()=>{}},env:{EXPECTED_BASE:base,EXPECTED_HEAD:head,PR_NUMBER:'4',CURRENT_RUN_ID:'1',ACTION_OUTCOME:extra.actionOutcome || 'success',STRUCTURED_OUTPUT:JSON.stringify(extra.structuredPayload || {verdict:'PASS',reviewed_base:base,reviewed_head:head,summary:'ok',report:''}),GITHUB_API_URL:'https://mock.test',GITHUB_REPOSITORY:'owner/repo',DISPLAY_TITLE:title,DETAILS_URL:'https://mock.test/run/1',FAILED_RUN_ID:'1',FAILED_EVENT:'pull_request',FAILED_CONCLUSION:'failure',RUN_ACTOR:'nikejshah',TRIGGERING_ACTOR:triggeringActor}} ,fetch:async(url,requestOptions={})=>{
@@ -215,7 +226,9 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
     const liveData = () => {
       pullReads += 1;
       if (extra.failSecondPull && pullReads === 2) return null;
-      return liveResponses ? (liveResponses.shift() || liveResponses.at(-1) || {base:{sha:liveBase},head:{sha:liveHead}}) : {base:{sha:liveBase},head:{sha:liveHead}};
+      if (!liveResponses) return {base:{sha:liveBase},head:{sha:liveHead}};
+      lastLiveResponse = liveResponses.shift() || lastLiveResponse || {base:{sha:liveBase},head:{sha:liveHead}};
+      return lastLiveResponse;
     };
     if (/\/actions\/runs\/2$/.test(url)) return {ok:true,json:async()=>({id:2,actor:{login:extra.passRunActor || 'nikejshah'},triggering_actor:{login:extra.passRunTriggeringActor || 'nikejshah'}}),headers:{get:()=>''}};
     if (!url.includes('/runs/2/jobs?') && !url.includes('/jobs?') && !url.includes('/workflows/') && !url.includes('/commits/')) {
@@ -265,6 +278,10 @@ async function primaryThenCompanionTest() {
   assert.equal((await ambiguousInvalidationTest({statuses:[]})).posts.length,0);
   assert.equal((await ambiguousInvalidationTest({pullError:true})).posts.length,1, 'open PR scan failure invalidates an existing reviewed head');
   assert.equal((await ambiguousInvalidationTest({statusError:true})).posts.length,1, 'status scan failure invalidates a possibly reviewed ambiguous head');
+  const freshBasePass = {context:'factory-os/claude-review',state:'success',description:`PASS base ${nextBase} head ${head}`};
+  assert.equal((await invalidationTest({statusSequence:[[ {context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`} ],[freshBasePass]]})).posts.length,0, 'base invalidation revalidates status before publication and preserves concurrent fresh PASS');
+  const freshAmbiguousPass = {context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`};
+  assert.equal((await ambiguousInvalidationTest({statusSequence:[[ {context:'factory-os/claude-review',state:'success',description:`PASS base ${nextBase} head ${head}`} ],[freshAmbiguousPass]],pullSequence:[[{number:4,base:{sha:base},head:{sha:head}},{number:5,base:{sha:nextBase},head:{sha:head}}],[{number:4,base:{sha:base},head:{sha:head}}]]})).posts.length,0, 'shared-head invalidation revalidates PR ambiguity and status before publication');
   const loaded = await policyTest();
   assert(loaded.output.includes('AGENTS.md @'));
   assert(loaded.output.includes('root policy'));
@@ -341,6 +358,10 @@ async function primaryThenCompanionTest() {
   assert.deepEqual(primaryOlderFailureRestoresNewerPass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure','success'], 'primary older failure restores a newer PASS that appears after the pre-publication scan');
   const primaryOlderFailureDoesNotRestoreStalePass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerFailedStatus,newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure'});
   assert.deepEqual(primaryOlderFailureDoesNotRestoreStalePass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary older failure does not restore a stale newer PASS after that same run publishes failure');
+  const primaryOlderFailureDoesNotRestoreReorderedStalePass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus,newerFailedStatus]],recordPostedStatuses:true,actionOutcome:'failure'});
+  assert.deepEqual(primaryOlderFailureDoesNotRestoreReorderedStalePass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary older failure does not restore stale PASS when the same newer run also has a failure status');
+  const companionOlderFailureDoesNotRestoreReorderedStalePass = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus,newerFailedStatus]],recordPostedStatuses:true});
+  assert.deepEqual(companionOlderFailureDoesNotRestoreReorderedStalePass.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'companion older failure does not restore stale PASS when the same newer run also has a failure status');
   const primaryOlderFailureDoesNotRestoreAfterBaseMove = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure',liveSequence:[{base:{sha:base},head:{sha:head}},{base:{sha:nextBase},head:{sha:head}}]});
   assert.deepEqual(primaryOlderFailureDoesNotRestoreAfterBaseMove.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'older failure does not restore a newer PASS after the PR base moves');
   const untrustedPassStatusRun = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{statusSequence:[[newerPassStatus],[newerPassStatus]],passRunActor:'outsider',actionOutcome:'failure'});

@@ -129,7 +129,7 @@ jobs:
           };
           const newerExactPassStatusRunId = async (prNumber, base, head) => {
             const expectedDescription = `PASS base ${base} head ${head}`;
-            const latestStatusByRunId = new Map();
+            const statusesByRunId = new Map();
             let url = `${apiUrl}/repos/${repository}/commits/${head}/statuses?per_page=100`;
             for (let pages = 0; url; pages += 1) {
               if (pages >= 10) throw new Error("Commit status pagination exceeds the failed-run receipt bound");
@@ -140,24 +140,26 @@ jobs:
                 const runId = runIdFromDetailsUrl(status.target_url);
                 if (runId <= BigInt(failedRunId)) continue;
                 const key = runId.toString();
-                if (!latestStatusByRunId.has(key)) latestStatusByRunId.set(key, status);
+                if (!statusesByRunId.has(key)) statusesByRunId.set(key, []);
+                statusesByRunId.get(key).push(status);
               }
               url = nextPage(link);
             }
-            let newest = 0n;
-            for (const [key, status] of latestStatusByRunId.entries()) {
-              const runId = BigInt(key);
-              if (status.state === "success" && status.description === expectedDescription &&
-                  runId > newest && await runIsOwnerTriggeredExactReview(runId, prNumber, base, head)) {
-                newest = runId;
-              }
-            }
-            if (newest === 0n) return 0n;
             const { data: live } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
             if (live?.head?.sha !== head || live?.base?.sha !== base) return 0n;
             if (await ambiguousOpenPrForHead(head, Number(prNumber), base)) return 0n;
             const latestRunId = await latestSameBaseHeadRunId(prNumber, base, head);
-            return latestRunId === newest ? newest : 0n;
+            let newest = 0n;
+            for (const [key, statuses] of statusesByRunId.entries()) {
+              const runId = BigInt(key);
+              if (runId !== latestRunId) continue;
+              const hasExactPass = statuses.some((status) => status.state === "success" && status.description === expectedDescription);
+              const hasConflictingStatus = statuses.some((status) => status.state !== "success" || status.description !== expectedDescription);
+              if (hasExactPass && !hasConflictingStatus && runId > newest && await runIsOwnerTriggeredExactReview(runId, prNumber, base, head)) {
+                newest = runId;
+              }
+            }
+            return newest;
           };
           const currentPrRefs = async (prNumber) => {
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
