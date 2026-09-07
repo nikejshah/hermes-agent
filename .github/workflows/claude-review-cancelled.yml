@@ -67,8 +67,8 @@ jobs:
             while (url) {
               const { data, link } = await requestJson(url);
               for (const job of data.jobs || []) {
-                const match = /^claude-review-pr-([1-9][0-9]*)-head-([0-9a-f]{40})$/.exec(job.name || "");
-                if (match) return { prNumber: match[1], head: match[2], source: "job-name" };
+                const match = /^claude-review-pr-([1-9][0-9]*)-base-([0-9a-f]{40})-head-([0-9a-f]{40})$/.exec(job.name || "");
+                if (match) return { prNumber: match[1], base: match[2], head: match[3], source: "job-name" };
               }
               url = nextPage(link);
             }
@@ -76,15 +76,15 @@ jobs:
           };
           const parseFromTitle = () => {
             const exact = /^Claude review PR #([1-9][0-9]*) @ ([0-9a-f]{40})$/.exec(displayTitle);
-            if (exact) return { prNumber: exact[1], head: exact[2], source: "display-title" };
+            if (exact) return { prNumber: exact[1], base: "", head: exact[2], source: "display-title" };
             const unresolved = /^Claude review PR #([1-9][0-9]*) @ resolve-head$/.exec(displayTitle);
-            if (unresolved) return { prNumber: unresolved[1], head: "", source: "unresolved-title" };
+            if (unresolved) return { prNumber: unresolved[1], base: "", head: "", source: "unresolved-title" };
             const malformedHead = /^Claude review PR #([1-9][0-9]*) @ .+$/.exec(displayTitle);
-            if (malformedHead) return { prNumber: malformedHead[1], head: "", source: "malformed-title" };
+            if (malformedHead) return { prNumber: malformedHead[1], base: "", head: "", source: "malformed-title" };
             return null;
           };
-          const runHasExactReviewJob = async (runId, prNumber, head) => {
-            const exactJobName = `claude-review-pr-${prNumber}-head-${head}`;
+          const runHasExactReviewJob = async (runId, prNumber, base, head) => {
+            const exactJobName = `claude-review-pr-${prNumber}-base-${base}-head-${head}`;
             let url = `${apiUrl}/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`;
             while (url) {
               const { data, link } = await requestJson(url);
@@ -93,18 +93,20 @@ jobs:
             }
             return false;
           };
-          const latestSameHeadRunId = async (prNumber, head) => {
+          const latestSameBaseHeadRunId = async (prNumber, base, head) => {
             let url = `${apiUrl}/repos/${repository}/actions/workflows/claude.yml/runs?per_page=100`;
             let latest = 0n;
             const baselineRunId = BigInt(failedRunId);
-            const exactTitle = `Claude review PR #${prNumber} @ ${head}`;
             while (url) {
               const { data, link } = await requestJson(url);
               for (const run of data.workflow_runs || []) {
                 if (!/^\d+$/.test(String(run.id))) continue;
                 const runId = BigInt(run.id);
                 if (runId <= baselineRunId) continue;
-                if (run.display_title === exactTitle || await runHasExactReviewJob(run.id, prNumber, head)) {
+                const actor = run.actor?.login || "";
+                const triggeringActor = run.triggering_actor?.login || "";
+                const ownerTriggered = actor === "nikejshah" && triggeringActor === "nikejshah";
+                if (ownerTriggered && await runHasExactReviewJob(run.id, prNumber, base, head)) {
                   if (runId > latest) latest = runId;
                 }
               }
@@ -112,9 +114,9 @@ jobs:
             }
             return latest;
           };
-          const currentPrHead = async (prNumber) => {
+          const currentPrRefs = async (prNumber) => {
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
-            return data?.head?.sha || "";
+            return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
           };
           const currentReceiptAlreadyPublished = async (head) => {
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/commits/${head}/status`);
@@ -129,7 +131,7 @@ jobs:
               console.log(`Skipped failed-run receipt for unsupported event ${failedEvent}`);
               return;
             }
-            if (runActor !== "nikejshah" && triggeringActor !== "nikejshah") {
+            if (runActor !== "nikejshah" || triggeringActor !== "nikejshah") {
               console.log(`Skipped failed-run receipt for non-owner actor ${runActor || "unknown"}`);
               return;
             }
@@ -140,9 +142,9 @@ jobs:
               return;
             }
 
-            if (!resolved.head) {
+            if (!resolved.head || !resolved.base) {
               await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, {
-                body: `Claude review receipt: **FAIL**. The ${failedEvent} workflow ended with ${failedConclusion} before resolving an exact PR head, so no commit status was written. [Details](${detailsUrl})`,
+                body: `Claude review receipt: **FAIL**. The ${failedEvent} workflow ended with ${failedConclusion} before resolving an exact PR base and head, so no commit status was written. [Details](${detailsUrl})`,
               });
               return;
             }
@@ -152,19 +154,21 @@ jobs:
               return;
             }
 
-            const liveHead = await currentPrHead(resolved.prNumber);
+            const live = await currentPrRefs(resolved.prNumber);
             let supersededReason = "";
-            if (liveHead !== resolved.head) {
-              supersededReason = `the PR head is now ${liveHead || "unknown"}`;
+            if (live.head !== resolved.head) {
+              supersededReason = `the PR head is now ${live.head || "unknown"}`;
+            } else if (live.base !== resolved.base) {
+              supersededReason = `the PR base is now ${live.base || "unknown"}`;
             }
-            const latestRunId = await latestSameHeadRunId(resolved.prNumber, resolved.head);
+            const latestRunId = await latestSameBaseHeadRunId(resolved.prNumber, resolved.base, resolved.head);
             if (!supersededReason && latestRunId > BigInt(failedRunId)) {
-              supersededReason = `a newer same-head review run ${latestRunId.toString()} exists`;
+              supersededReason = `a newer same-base/head review run ${latestRunId.toString()} exists`;
             }
 
             const body = supersededReason
-              ? `Claude review receipt: **FAIL** at \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion}, but this result is superseded because ${supersededReason}; no commit status was written. [Details](${detailsUrl})`
-              : `Claude review receipt: **FAIL** at \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion} before a terminal receipt was published. [Details](${detailsUrl})`;
+              ? `Claude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion}, but this result is superseded because ${supersededReason}; no commit status was written. [Details](${detailsUrl})`
+              : `Claude review receipt: **FAIL** for base \`${resolved.base}\` and head \`${resolved.head}\`. The ${failedEvent} workflow ended with ${failedConclusion} before a terminal receipt was published. [Details](${detailsUrl})`;
             await post(`/repos/${repository}/issues/${resolved.prNumber}/comments`, { body });
             if (!supersededReason) {
               await post(`/repos/${repository}/statuses/${resolved.head}`, {

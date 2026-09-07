@@ -5,7 +5,9 @@ companion copied from `nikejshah/factory-os`.
 
 Hardening applied for rollout:
 - review requests are accepted only when the triggering actor is
-  `nikejshah`; workflow dispatch also requires that actor;
+  `nikejshah`; workflow dispatch also requires that actor. These actor checks
+  protect trigger paths, but anyone with repository workflow-write access could
+  alter workflow code and must be trusted before the OAuth secret is installed;
 - a bootstrap `pull_request` run covers only non-draft, same-repository PRs
   opened, marked ready, or reopened by `nikejshah`, so the first setup PR can
   receive a real review before this workflow is on `main`; comment and manual
@@ -66,7 +68,10 @@ itself performs no dispatch, secret read, or GitHub write.
 
 The receipt schema requires a report field up to 12000 characters. BLOCK
 receipts include that report so actionable file/line findings remain visible;
-PASS receipts keep the concise summary.
+PASS receipts keep the concise summary. The trusted prompt tells Claude not to
+quote credentials, tokens, private financial source text, or long private
+code/source excerpts in findings; this is a review instruction, not a universal
+log-redaction system.
 
 Run `node .github/tests/claude-review.cjs` to execute the actual inline packet,
 receipt, and failed-run scripts with synthetic inputs and mocked GitHub responses.
