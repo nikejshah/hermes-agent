@@ -920,9 +920,9 @@ jobs:
               for (const [key, statuses] of statusesByRunId.entries()) {
                 const runId = BigInt(key);
                 if (runId !== latestRunId) continue;
-                const hasExactPass = statuses.some((status) => status.state === "success" && status.description === expectedDescription);
-                const hasConflictingStatus = statuses.some((status) => status.state !== "success" || status.description !== expectedDescription);
-                if (hasExactPass && !hasConflictingStatus && runId > newest && await runIsOwnerTriggeredExactReview(runId)) {
+                const latestStatus = statuses[0]; // GitHub lists commit statuses newest first.
+                const hasExactPass = latestStatus?.state === "success" && latestStatus.description === expectedDescription;
+                if (hasExactPass && runId > newest && await runIsOwnerTriggeredExactReview(runId)) {
                   newest = runId;
                 }
               }
