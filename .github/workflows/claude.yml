@@ -884,6 +884,7 @@ jobs:
               if (newest === 0n) return 0n;
               const live = await currentPrRefs();
               if (live.head !== expectedHead || live.base !== expectedBase) return 0n;
+              if (await ambiguousOpenPrForHead(expectedHead, Number(prNumber), expectedBase)) return 0n;
               const latestRunId = await latestSameBaseHeadRunId();
               return latestRunId === newest ? newest : 0n;
             };

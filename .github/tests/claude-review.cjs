@@ -366,5 +366,9 @@ async function primaryThenCompanionTest() {
     assert.equal((await run('nikejshah',false)).filter(p=>p.url.includes('/statuses/')).length,1, 'a title alone cannot suppress a receipt');
     assert.equal((await run('nikejshah',true)).filter(p=>p.url.includes('/statuses/')).length,0, 'newer authorized exact base/head jobs supersede old receipts');
   }
+  const ambiguousRestore = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,true,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,actionOutcome:'failure',openPulls:[{number:4,base:{sha:base},head:{sha:head}},{number:5,base:{sha:nextBase},head:{sha:head}}]});
+  assert.deepEqual(ambiguousRestore.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'primary older failure must not restore PASS on a shared ambiguous head');
+  const companionAmbiguousRestore = await companionTest(exactJob,'Claude review PR #4 @ resolve-head',head,base,null,true,false,'nikejshah',{newerSequence:[null,'nikejshah','nikejshah'],statusSequence:[[],[newerPassStatus]],recordPostedStatuses:true,openPulls:[{number:4,base:{sha:base},head:{sha:head}},{number:5,base:{sha:nextBase},head:{sha:head}}]});
+  assert.deepEqual(companionAmbiguousRestore.filter(p=>p.url.includes('/statuses/')).map(p=>p.body.state), ['failure'], 'companion older failure must not restore PASS on a shared ambiguous head');
   console.log('Actual workflow inline invalidation, packet, policy, receipt and companion regression probes passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

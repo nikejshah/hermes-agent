@@ -155,12 +155,40 @@ jobs:
             if (newest === 0n) return 0n;
             const { data: live } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
             if (live?.head?.sha !== head || live?.base?.sha !== base) return 0n;
+            if (await ambiguousOpenPrForHead(head, Number(prNumber), base)) return 0n;
             const latestRunId = await latestSameBaseHeadRunId(prNumber, base, head);
             return latestRunId === newest ? newest : 0n;
           };
           const currentPrRefs = async (prNumber) => {
             const { data } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
             return { base: data?.base?.sha || "", head: data?.head?.sha || "" };
+          };
+          const listOpenPulls = async () => {
+            const pulls = [];
+            let url = `${apiUrl}/repos/${repository}/pulls?state=open&per_page=100`;
+            for (let pages = 0; url; pages += 1) {
+              if (pages >= 10) return { pulls, overBound: true };
+              const { data, link } = await requestJson(url);
+              if (!Array.isArray(data)) throw new Error("Open PR response is malformed");
+              pulls.push(...data);
+              url = nextPage(link);
+            }
+            return { pulls, overBound: false };
+          };
+          const ambiguousOpenPrForHead = async (headSha, currentPrNumber, expectedBaseSha) => {
+            const { pulls, overBound } = await listOpenPulls();
+            for (const listed of pulls) {
+              const number = listed?.number;
+              if (!Number.isInteger(number) || number <= 0 || listed?.head?.sha !== headSha) continue;
+              if (number === currentPrNumber && listed?.base?.sha === expectedBaseSha) continue;
+              const { data: live } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${number}`);
+              if (live?.state === "open" && live?.head?.sha === headSha &&
+                  (live.number !== currentPrNumber || live?.base?.sha !== expectedBaseSha)) {
+                return { number: live.number, base: live?.base?.sha || "unknown" };
+              }
+            }
+            if (overBound) return { number: "unknown", base: "unknown" };
+            return null;
           };
           const receiptMarker = `<!-- claude-review-failed-run:${failedRunId} -->`;
           const receiptCommentAlreadyPublished = async (prNumber, base = "", head = "") => {
