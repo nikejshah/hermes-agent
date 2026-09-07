@@ -241,16 +241,24 @@ jobs:
             }
             return { pulls, overBound: false };
           };
-          const currentReviewStatusExists = async () => {
+          const currentReviewStatus = async () => {
             let url = `${apiUrl}/repos/${repository}/commits/${headSha}/statuses?per_page=100`;
             for (let pages = 0; url; pages += 1) {
               if (pages >= maxPages) throw new Error("Commit status pagination exceeds the ambiguity bound");
               const { data, link } = await requestJson(url);
               if (!Array.isArray(data)) throw new Error("Commit status response is malformed");
-              if (data.some((status) => status.context === "factory-os/claude-review")) return true;
+              const status = data.find((item) => item.context === "factory-os/claude-review") || null;
+              if (status) {
+                const expectedDescription = `PASS base ${baseSha} head ${headSha}`;
+                return {
+                  exists: true,
+                  currentPass: status.state === "success" && status.description === expectedDescription,
+                  staleSuccess: status.state === "success" && status.description !== expectedDescription,
+                };
+              }
               url = nextPage(link);
             }
-            return false;
+            return { exists: false, currentPass: false, staleSuccess: false };
           };
           (async () => {
             const { data: current } = await requestJson(`${apiUrl}/repos/${repository}/pulls/${prNumber}`);
@@ -258,14 +266,15 @@ jobs:
               console.log("Skipped shared-head invalidation because the PR moved before verification.");
               return;
             }
-            let statusExists = true;
+            let reviewStatus = { exists: true, currentPass: false, staleSuccess: true, indeterminate: "" };
             try {
-              statusExists = await currentReviewStatusExists();
+              reviewStatus = await currentReviewStatus();
             } catch (error) {
+              reviewStatus.indeterminate = error.message;
               console.log(`Treating commit-status lookup failure as reviewed: ${error.message}`);
             }
-            if (!statusExists) {
-              console.log("Skipped shared-head invalidation because no ambiguous reviewed head is present.");
+            if (!reviewStatus.exists && !reviewStatus.indeterminate) {
+              console.log("Skipped shared-head invalidation because no reviewed head is present.");
               return;
             }
             let ambiguous = true;
@@ -280,16 +289,26 @@ jobs:
               console.log(`Treating shared-head lookup failure as ambiguous: ${error.message}`);
             }
             if (!ambiguous) {
-              console.log("Skipped shared-head invalidation because no ambiguous reviewed head is present.");
-              return;
+              if (!reviewStatus.staleSuccess && !reviewStatus.indeterminate) {
+                console.log("Skipped shared-head invalidation because the reviewed head matches the current PR base/head and is not ambiguous.");
+                return;
+              }
+              console.log("Invalidating stale or unverified shared-head review status for the current PR.");
+            } else if (reviewStatus.currentPass) {
+              console.log("Invalidating current PASS because the head is shared by another open PR/base.");
             }
+            const reason = reviewStatus.indeterminate
+              ? "Review status lookup failed; fresh owner review needed"
+              : ambiguous
+                ? (overBound ? "Open PR scan exceeded bound; fresh owner review needed" : "Head shared by multiple PR bases; fresh owner review needed")
+                : "Review status stale for current PR base/head";
             await post(`/repos/${repository}/statuses/${headSha}`, {
               state: "failure",
               context: "factory-os/claude-review",
-              description: (overBound ? "Open PR scan exceeded bound; fresh owner review needed" : "Head shared by multiple PR bases; fresh owner review needed").slice(0, 140),
+              description: reason.slice(0, 140),
               target_url: detailsUrl,
             });
-            console.log(`Invalidated shared-head review status for PR #${prNumber}`);
+            console.log(`Invalidated PR review status for PR #${prNumber}`);
           })().catch((error) => {
             console.error(`Failed to invalidate shared-head review status: ${error.message}`);
             process.exitCode = 1;

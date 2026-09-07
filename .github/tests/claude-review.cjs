@@ -198,7 +198,9 @@ async function companionTest(jobName,title,liveHead=head,liveBase=base,newerActo
   const ambiguousBase = await invalidationTest({statuses:[{context:'factory-os/claude-review',state:'success',description:`PASS base ${nextBase} head ${head}`}],allPulls:[{number:4,base:{sha:nextBase},head:{sha:head}},{number:5,base:{sha:base},head:{sha:head}}],live5:{state:'open',number:5,base:{sha:base},head:{sha:head}}});
   assert.equal(ambiguousBase.posts.length,1, 'base invalidation fails closed on same-head different-base ambiguity');
   assert.equal((await ambiguousInvalidationTest()).posts.length,1, 'opened or retargeted same-head PR invalidates existing shared status');
-  assert.equal((await ambiguousInvalidationTest({pulls:[{number:4,base:{sha:base},head:{sha:head}}]})).posts.length,0);
+  assert.equal((await ambiguousInvalidationTest({pulls:[{number:4,base:{sha:base},head:{sha:head}}]})).posts.length,1, 'single open PR with reused head and stale success fails closed');
+  assert.equal((await ambiguousInvalidationTest({live:{state:'open',number:4,user:{login:'contributor'},base:{sha:base},head:{sha:head}},pulls:[{number:4,base:{sha:base},head:{sha:head}}]})).posts.length,1, 'non-owner retargeted PR with stale success fails closed');
+  assert.equal((await ambiguousInvalidationTest({statuses:[{context:'factory-os/claude-review',state:'success',description:`PASS base ${base} head ${head}`}],pulls:[{number:4,base:{sha:base},head:{sha:head}}]})).posts.length,0, 'unchanged exact base/head PASS is safe when no other open PR shares the head');
   assert.equal((await ambiguousInvalidationTest({statuses:[]})).posts.length,0);
   assert.equal((await ambiguousInvalidationTest({pullError:true})).posts.length,1, 'open PR scan failure invalidates an existing reviewed head');
   assert.equal((await ambiguousInvalidationTest({statusError:true})).posts.length,1, 'status scan failure invalidates a possibly reviewed ambiguous head');

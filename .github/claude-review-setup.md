@@ -18,7 +18,7 @@ Hardening applied for rollout:
   job. That job never starts Claude; it marks the current PR head as needing a
   fresh owner review when the base branch tip advances and the head already has
   a factory review status, unless a valid PASS for the new exact base and
-  current head already exists and the head is not shared by another open PR with a different base. Open PR and status pagination are followed under bounds; known PR pages are processed before an overbound job fails closed;
+  current head already exists and the head is not shared by another open PR with a different base. Pull-request opened, ready, reopened, edited and synchronize events also fail stale successful statuses whose description does not match the current PR base/head. Open PR and status pagination are followed under bounds; known PR pages are processed before an overbound job fails closed;
 - `anthropics/claude-code-action/base-action` v1 is pinned to the resolved v1
   tag commit recorded in the workflow; the full GitHub agent wrapper is not
   used and there is no PR checkout action;
@@ -74,6 +74,17 @@ cancellation is deliberately not attempted; freshness is enforced by
 exact-base/exact-head receipts plus live PR base and head checks.
 
 This template copy is local until installed. Once merged into a repository default branch, the installed workflows can react to the configured events, read the configured Claude OAuth secret in the review job, and post review comments or commit statuses under the hardcoded `nikejshah` operator policy. Keep that owner value only for `nikejshah/*` repositories or after separately verifying the same intended operator boundary.
+
+## Merge boundary
+
+This rollout supports owner-controlled pull requests opened by `nikejshah` in
+the same repository only. Before merging, verify the actual pull request,
+repository owner and actor, current base and head, and fresh exact-head Claude
+and Codex receipts. A fixed commit status by itself is not merge evidence.
+Fork pull requests and non-owner actors are unsupported until a separate
+security design covers their trust and token boundaries. Failed, pending,
+ambiguous, stale, or unresolved receipts are never merge approval; keep the
+pull request blocked until a fresh exact-head review resolves the condition.
 
 The receipt schema requires a report field up to 12000 characters. BLOCK
 receipts include that report so actionable file/line findings remain visible;
