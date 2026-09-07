@@ -365,6 +365,16 @@ jobs:
 
           metadata_file="$RUNNER_TEMP/claude-review-pr.json"
           gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" > "$metadata_file"
+          METADATA_FILE="$metadata_file" EXPECTED_AUTHOR='nikejshah' EXPECTED_REPOSITORY="$GITHUB_REPOSITORY" node <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.env.METADATA_FILE, "utf8"));
+          const author = metadata?.user?.login;
+          const headRepository = metadata?.head?.repo?.full_name;
+          if (author !== process.env.EXPECTED_AUTHOR || headRepository !== process.env.EXPECTED_REPOSITORY) {
+            console.error("Refusing review: PR author and same-repository head are required.");
+            process.exit(1);
+          }
+          NODE
           base_sha="$(jq -er '.base.sha | select(test("^[0-9a-f]{40}$"))' "$metadata_file")"
           head_sha="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' "$metadata_file")"
           if [ -n "$EXPECTED_HEAD_SHA" ] &&
